@@ -540,3 +540,58 @@ opsec_status() {
   fi
 }
 
+
+# === docs helper (snippets → README) ===
+_docs_repo() { print -- "${OMNITERM_REPO:-$HOME/kydras-omniterm}"; }
+_docs_dir()  { print -- "$(_docs_repo)/docs/snippets"; }
+_docs_target(){ print -- "$(_docs_repo)/README.md"; }
+
+docs_list() {
+  local d; d="$(_docs_dir)"; mkdir -p "$d"
+  ls -1 "$d"/*.md 2>/dev/null | sed "s#.*/##; s#\.md$##" || echo "(no snippets yet)"
+}
+docs_show() {
+  local s="${1:-}"; [[ -z "$s" ]] && { echo "Usage: omniterm docs show <section>"; return 2; }
+  local f="$(_docs_dir)/${s}.md"
+  [[ -r "$f" ]] || { echo "[-] snippet not found: $s"; docs_list; return 2; }
+  cat "$f"
+}
+docs_add() {
+  local s="${1:-}"; shift || true
+  [[ -z "$s" ]] && { echo "Usage: omniterm docs add <section> [--after '### Heading'|--top|--bottom]"; return 2; }
+  local repo="$(_docs_repo)" d="$(_docs_dir)" readme="$(_docs_target)"
+  local src="$d/${s}.md" where="bottom" after=""
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --repo) shift; repo="${1:-$repo}"; d="$repo/docs/snippets"; readme="$repo/README.md" ;;
+      --after) shift; after="${1:-}"; where="after" ;;
+      --top) where="top" ;;
+      --bottom) where="bottom" ;;
+      *) break ;;
+    esac; shift || true
+  done
+  [[ -r "$src" ]] || { echo "[-] snippet not found: $s"; docs_list; return 2; }
+  mkdir -p "$repo"; : > "$readme" 2>/dev/null || true
+  local marker="<!-- OT:section:${s} -->"
+  if grep -qF "$marker" "$readme" 2>/dev/null; then
+    echo "[docs] section '${s}' already present in README.md"; return 0
+  fi
+  local tmp; tmp="$(mktemp)"
+  { print -- "$marker"; print; cat "$src"; print; } > "$tmp"
+  case "$where" in
+    top)     { cat "$tmp"; cat "$readme" 2>/dev/null; } > "${readme}.new" ;;
+    after)
+      if [[ -n "$after" ]] && grep -n "^${after}$" "$readme" >/dev/null 2>&1; then
+        awk -v insf="$tmp" -v h="$after" '
+          {print}
+          $0==h && !done {print ""; while((getline l < insf)>0) print l; print ""; done=1}
+        ' "$readme" > "${readme}.new"
+      else
+        { cat "$readme" 2>/dev/null; cat "$tmp"; } > "${readme}.new"
+      fi
+      ;;
+    bottom|*){ cat "$readme" 2>/dev/null; cat "$tmp"; } > "${readme}.new" ;;
+  esac
+  mv "${readme}.new" "$readme"
+  echo "[docs] added '${s}' to $readme"
+}
