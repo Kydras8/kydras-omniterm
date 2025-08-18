@@ -1,0 +1,9 @@
+title = "Kydras OmniTerm – Gitleaks config"
+
+[allowlist]
+# Ignore bundled themes and archived release zips
+paths = [
+  "themes/.*\\.tmux$",
+  "themes/zsh/.*\\.zsh$",
+  "_zips/.*",
+]
