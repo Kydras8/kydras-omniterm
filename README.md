@@ -61,3 +61,23 @@ zsh test/test-quick.zsh
 
 ## License
 MIT © 2025 Kydras Systems
+
+### Recording & Queue
+Record a pane and play it back later:
+```zsh
+omniterm record start      # Ctrl-D to stop
+omniterm record play       # play last recording
+```
+
+Batch jobs with a simple queue:
+```zsh
+omniterm queue add :bash 'echo one; sleep 1' --title one --notify
+omniterm queue add :py 'print(2+2)' --title two --notify
+omniterm queue run
+```
+
+### Zsh completion
+```zsh
+# Installed to ~/.zsh/completions/_omniterm
+# Tab-complete subcommands, languages, and themes.
+```
