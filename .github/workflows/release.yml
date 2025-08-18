@@ -1,0 +1,40 @@
+name: release (zip on tag)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'   # e.g., v3.4.0
+
+permissions:
+  contents: write   # needed to create releases
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build zip
+        run: |
+          set -eux
+          mkdir -p out/kydras-omniterm
+          rsync -av --exclude='.git' ./ out/kydras-omniterm/
+          cd out
+          ZIP="kydras-omniterm-${GITHUB_REF_NAME}.zip"
+          zip -r "$ZIP" kydras-omniterm
+          sha256sum "$ZIP" > "$ZIP.sha256"
+          echo "ZIP=$PWD/$ZIP" >> $GITHUB_ENV
+          echo "SHA=$PWD/$ZIP.sha256" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Kydras OmniTerm ${{ github.ref_name }}
+          files: |
+            ${{ env.ZIP }}
+            ${{ env.SHA }}
+          generate_release_notes: true
