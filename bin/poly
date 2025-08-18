@@ -4,6 +4,7 @@
 set -euo pipefail
 setopt NO_BANG_HIST
 emulate -L zsh
+setopt NULL_GLOB
 
 usage() {
   cat <<'H'
