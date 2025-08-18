@@ -1,0 +1,287 @@
+#!/usr/bin/env zsh
+# Kydras OmniTerm polyglot runner
+# Version: 0.2.0
+set -euo pipefail
+setopt NO_BANG_HIST
+emulate -L zsh
+
+usage() {
+  cat <<'H'
+poly — route code to the right interpreter
+
+Usage:
+  poly [:lang] 'CODE...'
+  echo 'CODE' | poly [:lang] -
+  poly --docker[:IMAGE] [:lang] 'CODE'
+
+Options:
+  --sandbox         Use firejail if available (private FS, no net)
+  --docker[=IMAGE]  Run inside Docker/Podman (no net, limited resources)
+  -h, --help        Show help
+
+Supported langs (built-in):
+  zsh, sh, bash, py/python, js/node, rb/ruby, php, go, c, cpp/cxx/cc, rs/rust, java, lua
+
+Plugins:
+  Put files in ~/.poly/runners.d/*.zsh defining languages with 'poly_can <lang>'
+  and implementing 'poly_run_<lang>() { code="$1"; poly_out "$code"; }'
+
+H
+}
+
+# ---- settings ----
+SANDBOX=0
+DOCKER=0
+DOCKER_IMAGE=""
+LANG=""
+CODE=""
+
+# Map default docker images per lang
+typeset -A DOCKER_DEFAULT=(
+  [python]='python:3-alpine'
+  [py]='python:3-alpine'
+  [node]='node:alpine'
+  [js]='node:alpine'
+  [ruby]='ruby:alpine'
+  [rb]='ruby:alpine'
+  [php]='php:cli-alpine'
+  [go]='golang:alpine'
+  [c]='gcc:latest'
+  [cpp]='gcc:latest'
+  [cxx]='gcc:latest'
+  [cc]='gcc:latest'
+  [rust]='rust:alpine'
+  [rs]='rust:alpine'
+  [java]='eclipse-temurin:21-jdk-alpine'
+  [lua]='alpine:latest'   # with 'lua' installed in image if custom
+  [bash]='bash:latest'
+  [zsh]='ubuntu:latest'   # minimal; not guaranteed to have zsh
+)
+
+# ---- helpers ----
+mktemp_code() { local ext="$1" tmp; tmp="$(mktemp "/tmp/poly.XXXXXX.${ext}")"; print -r -- "$CODE" > "$tmp"; echo "$tmp"; }
+need() { local prog="$1"; command -v "$prog" >/dev/null 2>&1 || { print -u2 "[-] missing dependency: $prog"; exit 127; } }
+poly_out() { print -r -- "$1"; }
+have() { command -v "$1" >/dev/null 2>&1 }
+is_docker() { command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 }
+dockercmd() { if command -v docker >/dev/null 2>&1; then echo docker; else echo podman; fi }
+
+# Auto-detect language from code (simple heuristics)
+detect_lang() {
+  local src="$1"
+  # shebang
+  if [[ "$src" == '#!'* ]]; then
+    case "$src" in
+      '#!'*python*) echo py; return ;;
+      '#!'*bash*) echo bash; return ;;
+      '#!'*zsh*) echo zsh; return ;;
+      '#!'*node*|*deno*) echo js; return ;;
+      '#!'*ruby*) echo rb; return ;;
+      '#!'*php*) echo php; return ;;
+      '#!'*lua*) echo lua; return ;;
+    esac
+  fi
+  # ```lang fences
+  if [[ "$src" == *$'```'* ]]; then
+    local tag; tag="$(printf %s "$src" | sed -n 's/^```\\([a-zA-Z0-9+_-]*\\).*/\\1/p' | head -n1)"
+    case "$tag" in
+      python|py) echo py; return ;;
+      javascript|js|node) echo js; return ;;
+      bash|sh) echo bash; return ;;
+      zsh) echo zsh; return ;;
+      ruby|rb) echo rb; return ;;
+      php) echo php; return ;;
+      go|golang) echo go; return ;;
+      c) echo c; return ;;
+      cpp|cxx|cc|c++) echo cpp; return ;;
+      rust|rs) echo rs; return ;;
+      java) echo java; return ;;
+      lua) echo lua; return ;;
+    esac
+  fi
+  # heuristics
+  if [[ "$src" == *'console.log('* ]]; then echo js; return ; fi
+  if [[ "$src" == *$'import '* || "$src" == *'print('* ]]; then echo py; return ; fi
+  if [[ "$src" == *'#include <'* ]]; then
+    if [[ "$src" == *'iostream'* ]]; then echo cpp; else echo c; fi; return
+  fi
+  if [[ "$src" == *'package main'* && "$src" == *'func main('* ]]; then echo go; return ; fi
+  if [[ "$src" == *'public static void main'* ]]; then echo java; return ; fi
+  echo zsh
+}
+
+# Simple plugin system
+typeset -a POLY_LANGS
+poly_can() { POLY_LANGS+=("$1") }
+run_plugin() {
+  local lang="$1" code="$2"
+  local fn="poly_run_${lang}"
+  if typeset -f "$fn" >/dev/null 2>&1; then
+    "$fn" "$code"
+    return $?
+  fi
+  return 2
+}
+
+# Load plugins
+for f in ~/.poly/runners.d/*.zsh; do [[ -r "$f" ]] && source "$f"; done
+for f in "$0:A:h:h/runners/"*.zsh; do [[ -r "$f" ]] && source "$f"; done 2>/dev/null || true
+
+# Parse args
+args=("$@"); i=1
+while (( i <= $#args )); do
+  a="${args[i]}"
+  case "$a" in
+    -h|--help) usage; exit 0 ;;
+    --sandbox) SANDBOX=1 ;;
+    --docker) DOCKER=1 ;;
+    --docker=*) DOCKER=1; DOCKER_IMAGE="${a#--docker=}" ;;
+    :*) LANG="${a#:}" ;;
+    -)  CODE="$(cat)" ;;
+    *)  if [[ -z "$CODE" ]]; then CODE="$a"; else CODE="$CODE"$'\n'"$a"; fi ;;
+  esac
+  (( i++ ))
+done
+
+[[ -z "$CODE" ]] && { if [[ ! -t 0 ]]; then CODE="$(cat || true)"; else usage; exit 1; fi; }
+[[ -z "$LANG" ]] && LANG="$(detect_lang "$CODE")"
+
+# Sandbox
+prefix_cmd=()
+if (( SANDBOX )) && have firejail; then
+  prefix_cmd=(firejail --quiet --private --net=none --caps.drop=all --seccomp)
+fi
+
+# Docker wrapper (mount /tmp and disable net)
+docker_wrap() {
+  local image="${1}" ; shift
+  local runner= ; runner="$(dockercmd)"
+  local limits=(--rm -i --network none --cpus 1 -m 256m --pids-limit 256 -v /tmp:/tmp -w /work)
+  "$runner" run "${limits[@]}" -v "$PWD":/work "$image" "$@"
+}
+
+# Dispatch built-ins or plugin
+case "$LANG" in
+  zsh|sh)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[zsh]}}"
+      docker_wrap "$img" sh -lc "apk add --no-cache zsh >/dev/null 2>&1 || true; zsh -s" <<<"$CODE"
+    else
+      need zsh; print -r -- "$CODE" | "${(@)prefix_cmd}" zsh -s
+    fi
+    ;;
+  bash)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[bash]}}"
+      docker_wrap "$img" bash -lc "cat > /tmp/code.sh; bash /tmp/code.sh" <<<"$CODE"
+    else
+      need bash; print -r -- "$CODE" | "${(@)prefix_cmd}" bash -s
+    fi
+    ;;
+  py|python)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[py]}}"
+      docker_wrap "$img" python - <<<"$CODE"
+    else
+      need python3; print -r -- "$CODE" | "${(@)prefix_cmd}" python3 -
+    fi
+    ;;
+  js|node)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[js]}}"
+      docker_wrap "$img" node - <<<"$CODE"
+    else
+      need node; print -r -- "$CODE" | "${(@)prefix_cmd}" node -
+    fi
+    ;;
+  rb|ruby)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[rb]}}"
+      docker_wrap "$img" ruby - <<<"$CODE"
+    else
+      need ruby; print -r -- "$CODE" | "${(@)prefix_cmd}" ruby -
+    fi
+    ;;
+  php)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[php]}}"
+      docker_wrap "$img" php -r "$(printf %q "$CODE")"
+    else
+      need php
+      tmp="$(mktemp "/tmp/poly.XXXXXX.php")"; print -r -- "$CODE" > "$tmp"
+      "${(@)prefix_cmd}" php "$tmp"; rm -f "$tmp"
+    fi
+    ;;
+  go|golang)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[go]}}"
+      docker_wrap "$img" sh -lc "cat >/work/.poly.go <<'GO'\n$CODE\nGO\n go run /work/.poly.go"
+    else
+      need go
+      tmp="$(mktemp "/tmp/poly.XXXXXX.go")"; print -r -- "$CODE" > "$tmp"
+      "${(@)prefix_cmd}" go run "$tmp"; rm -f "$tmp"
+    fi
+    ;;
+  c)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[c]}}"
+      docker_wrap "$img" sh -lc "cat >/work/.poly.c <<'C'\n$CODE\nC\n gcc -O2 -pipe -o /work/.poly.bin /work/.poly.c && /work/.poly.bin"
+    else
+      need gcc
+      src="$(mktemp "/tmp/poly.XXXXXX.c")"; print -r -- "$CODE" > "$src"; bin="${src%.c}.bin"
+      if "${(@)prefix_cmd}" gcc -O2 -pipe -o "$bin" "$src"; then "${(@)prefix_cmd}" "$bin"; fi
+      rm -f "$src" "$bin"
+    fi
+    ;;
+  cpp|cxx|cc)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[cpp]}}"
+      docker_wrap "$img" sh -lc "cat >/work/.poly.cpp <<'CPP'\n$CODE\nCPP\n g++ -O2 -pipe -std=c++17 -o /work/.poly.bin /work/.poly.cpp && /work/.poly.bin"
+    else
+      need g++
+      src="$(mktemp "/tmp/poly.XXXXXX.cpp")"; print -r -- "$CODE" > "$src"; bin="${src%.cpp}.bin"
+      if "${(@)prefix_cmd}" g++ -O2 -pipe -std=c++17 -o "$bin" "$src"; then "${(@)prefix_cmd}" "$bin"; fi
+      rm -f "$src" "$bin"
+    fi
+    ;;
+  rs|rust)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[rs]}}"
+      docker_wrap "$img" sh -lc "cat >/work/.poly.rs <<'RS'\n$CODE\nRS\n rustc -O -o /work/.poly.bin /work/.poly.rs && /work/.poly.bin"
+    else
+      need rustc
+      src="$(mktemp "/tmp/poly.XXXXXX.rs")"; print -r -- "$CODE" > "$src"; bin="${src%.rs}.bin"
+      if "${(@)prefix_cmd}" rustc -O -o "$bin" "$src"; then "${(@)prefix_cmd}" "$bin"; fi
+      rm -f "$src" "$bin"
+    fi
+    ;;
+  java)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[java]}}"
+      docker_wrap "$img" sh -lc "cat >/work/Poly.java <<'JAVA'\n$CODE\nJAVA\n javac /work/Poly.java && java -cp /work Poly"
+    else
+      need javac; need java
+      src="$(mktemp "/tmp/PolyXXXX.java")"; print -r -- "$CODE" > "$src"
+      dir="${src:h}"; (cd "$dir" && "${(@)prefix_cmd}" javac "$src:t" && "${(@)prefix_cmd}" java "${src:t:r}")
+      rm -f "$src"
+    fi
+    ;;
+  lua)
+    if (( DOCKER )); then
+      img="${DOCKER_IMAGE:-${DOCKER_DEFAULT[lua]}}"
+      docker_wrap "$img" sh -lc "apk add --no-cache lua >/dev/null 2>&1 || true; lua -" <<<"$CODE"
+    else
+      need lua; print -r -- "$CODE" | "${(@)prefix_cmd}" lua -
+    fi
+    ;;
+  *)
+    # plugin fallback
+    if run_plugin "$LANG" "$CODE"; then
+      exit 0
+    else
+      print -u2 "[-] Unknown language '$LANG'."
+      print -u2 "   Built-ins: zsh, bash, py, js, rb, php, go, c, cpp, rs, java, lua"
+      exit 2
+    fi
+    ;;
+esac

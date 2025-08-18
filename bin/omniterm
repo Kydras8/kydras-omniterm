@@ -1,0 +1,77 @@
+#!/usr/bin/env zsh
+# OmniTerm: multi-session launcher using tmux
+set -euo pipefail
+setopt NO_BANG_HIST
+emulate -L zsh
+
+SESSION="${OMNITERM_SESSION:-k-omni}"
+
+usage() {
+  cat <<'H'
+omniterm — manage a tmux session for OmniTerm
+
+Usage:
+  omniterm start [SESSION]      # create/attach
+  omniterm attach [SESSION]
+  omniterm new [:lang] [title]  # create window with REPL/shell
+  omniterm run [:lang] 'code'   # new window, run code via poly
+  omniterm list                 # list windows
+  omniterm kill [SESSION]       # kill session
+H
+}
+
+ensure_tmux() { command -v tmux >/dev/null || { print -u2 "[-] tmux not found. Install: sudo apt install -y tmux"; exit 127; }; }
+
+session_exists() { tmux has-session -t "$1" 2>/dev/null }
+
+cmd="${1:-}"
+[[ -z "$cmd" || "$cmd" == "-h" || "$cmd" == "--help" ]] && { usage; exit 0; }
+
+ensure_tmux
+shift || true
+case "$cmd" in
+  start)
+    SESSION="${1:-$SESSION}"
+    if session_exists "$SESSION"; then
+      tmux attach -t "$SESSION"
+    else
+      tmux new-session -d -s "$SESSION" -n "zsh" zsh -l
+      tmux attach -t "$SESSION"
+    fi
+    ;;
+  attach)
+    SESSION="${1:-$SESSION}"
+    tmux attach -t "$SESSION"
+    ;;
+  list)
+    tmux ls
+    ;;
+  kill)
+    SESSION="${1:-$SESSION}"
+    tmux kill-session -t "$SESSION"
+    ;;
+  new)
+    lang="${1:-:zsh}"
+    title="${2:-win$RANDOM}"
+    session="${OMNITERM_SESSION:-$SESSION}"
+    session_exists "$session" || tmux new-session -d -s "$session" -n "zsh" zsh -l
+    case "$lang" in
+      :py|:python)  tmux new-window -t "$session" -n "$title" 'python3 -q' ;;
+      :js|:node)    tmux new-window -t "$session" -n "$title" 'node' ;;
+      :rb|:ruby)    tmux new-window -t "$session" -n "$title" 'irb' ;;
+      :lua)         tmux new-window -t "$session" -n "$title" 'lua' ;;
+      :bash)        tmux new-window -t "$session" -n "$title" 'bash -l' ;;
+      :zsh|:sh|*)   tmux new-window -t "$session" -n "$title" 'zsh -l' ;;
+    esac
+    ;;
+  run)
+    lang="${1:-:zsh}"; shift || true
+    code="$*"
+    title="${OMNITERM_TITLE:-job$RANDOM}"
+    session="${OMNITERM_SESSION:-$SESSION}"
+    session_exists "$session" || tmux new-session -d -s "$session" -n "zsh" zsh -l
+    tmux new-window -t "$session" -n "$title" "poly $lang $code; echo; echo '[done] press Enter...'; read _"
+    ;;
+  *)
+    usage; exit 2 ;;
+esac

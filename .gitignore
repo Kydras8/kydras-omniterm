@@ -1,0 +1,11 @@
+.DS_Store
+*.bin
+*.o
+*.class
+__pycache__/
+node_modules/
+dist/
+build/
+.venv/
+.logs/
+outputs/
