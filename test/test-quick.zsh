@@ -25,6 +25,7 @@ fi
 if command -v tmux >/dev/null 2>&1; then
   echo "[test] omniterm basics"
   OMNITERM_SESSION="ci-omni" bin/omniterm start & sleep 1
+  OMNITERM_SESSION="ci-omni" bin/omniterm start -d
   OMNITERM_SESSION="ci-omni" bin/omniterm new :bash demo
   OMNITERM_SESSION="ci-omni" bin/omniterm run :zsh 'echo hi from omni'
   tmux kill-session -t ci-omni

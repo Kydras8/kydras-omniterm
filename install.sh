@@ -10,6 +10,7 @@ echo "[omniterm] installing to $BIN"
 mkdir -p "$BIN"
 
 SRC_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+
 if [[ -f "$SRC_DIR/bin/poly" ]]; then
   cp -f "$SRC_DIR/bin/poly" "$BIN/poly"
   cp -f "$SRC_DIR/bin/omniterm" "$BIN/omniterm"
@@ -29,4 +30,4 @@ case ":$PATH:" in
 esac
 
 echo "[omniterm] installed: $(command -v poly) and $(command -v omniterm)"
-echo "[omniterm] restart your shell or run: exec zsh -l
+echo "[omniterm] restart your shell or run: exec zsh -l"
