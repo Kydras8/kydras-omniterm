@@ -12,8 +12,8 @@ Polyglot terminal runner with multi-session launcher.
 ## Install
 
 ```zsh
-# Quick installer (after you publish, update YOUR_GITHUB below)
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB/kydras-omniterm/main/install.sh | zsh
+# Quick installer (after you publish, update Kydras8 below)
+curl -fsSL https://raw.githubusercontent.com/Kydras8/kydras-omniterm/main/install.sh | zsh
 
 # Manual
 chmod +x bin/poly bin/omniterm

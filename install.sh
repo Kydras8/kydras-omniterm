@@ -15,7 +15,7 @@ if [[ -f "$SRC_DIR/bin/poly" ]]; then
   cp -f "$SRC_DIR/bin/omniterm" "$BIN/omniterm"
 else
   for f in poly omniterm; do
-    RAW_URL="${RAW_URL:-https://raw.githubusercontent.com/YOUR_GITHUB/kydras-omniterm/main/bin/$f}"
+    RAW_URL="${RAW_URL:-https://raw.githubusercontent.com/Kydras8/kydras-omniterm/main/bin/$f}"
     curl -fsSL "$RAW_URL" -o "$BIN/$f"
     chmod +x "$BIN/$f"
   done
