@@ -9,3 +9,10 @@ build/
 .venv/
 .logs/
 outputs/
+# secrets & artifacts
+.env
+*.key *.pem *.p12 *.crt
+secrets/
+*.sqlite
+*.log
+*.bin
