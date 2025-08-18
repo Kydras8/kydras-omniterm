@@ -5,15 +5,20 @@ emulate -L zsh
 
 usage() {
   cat <<'H'
-omniterm — tmux session manager with profiles
+omniterm — tmux session manager with profiles + themes
 
 Usage:
-  omniterm start [-d|--detached] [--session NAME] [--profile NAME]
+  omniterm start [-d|--detached] [--session NAME] [--profile NAME] [--theme NAME]
   omniterm attach [SESSION]
-  omniterm new [:lang] [title]
-  omniterm run [:lang] 'code'
   omniterm list
   omniterm kill [SESSION]
+  omniterm new [:lang] [title]
+  omniterm run [:lang] 'code'
+  omniterm theme NAME
+  omniterm doctor
+  omniterm self-update [REPO_PATH]
+  omniterm snapshot [SESSION] [NAME]
+  omniterm restore  [SESSION] [NAME]
 H
 }
 
@@ -21,18 +26,97 @@ ensure_tmux(){ command -v tmux >/dev/null || { print -u2 "[-] tmux not found. su
 session_exists(){ tmux has-session -t "$1" 2>/dev/null }
 is_tty(){ [[ -t 1 ]] }
 
+# --- theme support ---
+apply_theme() {
+  local s="$1" name="${2:-}"
+  [[ -z "$name" ]] && return 0
+  local f="" cfg="$HOME/.config/omniterm/theme-${name}.tmux" \
+        share="$HOME/.local/share/omniterm/themes/theme-${name}.tmux" \
+        here="$0:A:h:h/themes/theme-${name}.tmux"
+  if   [[ -r "$cfg"  ]]; then f="$cfg"
+  elif [[ -r "$share" ]]; then f="$share"
+  elif [[ -r "$here" ]];  then f="$here"
+  fi
+  [[ -n "$f" ]] && tmux source-file "$f" || print -u2 "[omniterm] theme not found: $name"
+  tmux set-environment -g OMNITERM_ZSH_THEME "$name" 2>/dev/null || true
+}
+
+# --- extras: doctor / self-update / snapshot ---
+doctor() {
+  echo "[doctor] zsh:    $(zsh --version 2>/dev/null || echo missing)"
+  echo "[doctor] tmux:   $(tmux -V 2>/dev/null || echo missing)"
+  for x in node python3 gcc docker podman firejail inotifywait unzip rsync; do
+    if command -v "$x" >/dev/null 2>&1; then
+      echo "[doctor] $x:    $($x --version 2>&1 | head -n1)"
+    else
+      echo "[doctor] $x:    missing"
+    fi
+  done
+  command -v poly >/dev/null 2>&1 || echo "[doctor] poly not on PATH"
+}
+
+self_update() {
+  local repo="${1:-$HOME/kydras-omniterm}"
+  if [[ -d "$repo/.git" ]]; then
+    echo "[self-update] $repo"
+    (cd "$repo" && git pull --ff-only && ./install.sh)
+    echo "[self-update] done."
+  elif command -v gh >/dev/null 2>&1; then
+    echo "[self-update] using gh latest release"
+    local tmp; tmp="$(mktemp -d)"; pushd "$tmp" >/dev/null
+    gh release download -R Kydras8/kydras-omniterm -p 'kydras-omniterm-v*.zip' -O latest.zip
+    unzip -q latest.zip
+    rsync -av kydras-omniterm/ "$HOME/kydras-omniterm/"
+    "$HOME/kydras-omniterm/install.sh"
+    popd >/dev/null; rm -rf "$tmp"
+    echo "[self-update] done."
+  else
+    echo "[-] provide repo path or install GitHub CLI (gh)" >&2
+    return 2
+  fi
+}
+
+snapshot_save() {
+  local s="${1:-${OMNITERM_SESSION:-k-omni}}"
+  local name="${2:-default}"
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/omniterm/snapshots"
+  mkdir -p "$dir"
+  local out="$dir/${s}-${name}.tmux"
+  {
+    echo "# snapshot for session $s @ $(date -Is)"
+    echo "new-session -d -s \"$s\" -n zsh zsh -l"
+    tmux list-windows -t "$s" -F "rename-window -t \"$s:#{window_index}\" \"#{window_name}\"" || true
+    tmux list-windows -t "$s" -F "#{window_index} #{window_layout}" | while read -r idx layout; do
+      echo "select-window -t \"$s:$idx\""
+      echo "select-layout -t \"$s:$idx\" $layout"
+    done
+  } > "$out"
+  echo "[snapshot] saved -> $out"
+}
+
+snapshot_restore() {
+  local s="${1:-${OMNITERM_SESSION:-k-omni}}"
+  local name="${2:-default}"
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/omniterm/snapshots"
+  local file="$dir/${s}-${name}.tmux"
+  [[ -r "$file" ]] || { echo "[-] snapshot not found: $file" >&2; return 2; }
+  tmux has-session -t "$s" 2>/dev/null || tmux new-session -d -s "$s" -n zsh zsh -l
+  tmux source-file "$file"
+  echo "[snapshot] restored from $file"
+}
+
+# --- defaults ---
 SESSION="${OMNITERM_SESSION:-k-omni}"
 PROFILE="${OMNITERM_PROFILE:-default}"
+THEME="${OMNITERM_THEME:-}"
 
-cmd="${1:-}"; [[ -z "$cmd" || "$cmd" == "-h" || "$cmd" == "--help" ]] && { usage; exit 0; }
+cmd="${1:-}"
+[[ -z "$cmd" || "$cmd" == "-h" || "$cmd" == "--help" ]] && { usage; exit 0; }
 ensure_tmux; shift || true
-
-# helpers will be added below
 
 case "$cmd" in
   start)
     det=0
-    # flags
     while [[ "${1:-}" == -* ]]; do
       case "$1" in
         -d|--detached) det=1 ;;
@@ -40,34 +124,28 @@ case "$cmd" in
         --session=*) SESSION="${1#--session=}" ;;
         --profile) shift; PROFILE="${1:-$PROFILE}" ;;
         --profile=*) PROFILE="${1#--profile=}" ;;
+        --theme) shift; THEME="${1:-$THEME}" ;;
+        --theme=*) THEME="${1#--theme=}" ;;
         *) print -u2 "Unknown flag: $1"; usage; exit 2 ;;
-      esac
-      shift || true
+      esac; shift || true
     done
-    # optional positional session
     [[ -n "${1:-}" ]] && SESSION="$1"
 
     if session_exists "$SESSION"; then
+      apply_theme "$SESSION" "$THEME"
       (( det || ! is_tty )) && { echo "[omniterm] session '$SESSION' already running (detached)"; exit 0; }
       exec tmux attach -t "$SESSION"
     fi
 
-    # create base session
     tmux new-session -d -s "$SESSION" -n "zsh" zsh -l
-
-    # load profile if exists
     cfg="${XDG_CONFIG_HOME:-$HOME/.config}/omniterm/profile-${PROFILE}.zsh"
-    if [[ -r "$cfg" ]]; then
-      source "$cfg"
-      typeset -f omniterm_profile >/dev/null 2>&1 && omniterm_profile "$SESSION"
-    fi
-
+    if [[ -r "$cfg" ]]; then source "$cfg"; typeset -f omniterm_profile >/dev/null 2>&1 && omniterm_profile "$SESSION"; fi
+    apply_theme "$SESSION" "$THEME"
     (( det || ! is_tty )) && { echo "[omniterm] started session '$SESSION' (detached)"; exit 0; }
     exec tmux attach -t "$SESSION"
     ;;
   attach)
-    SESSION="${1:-$SESSION}"
-    exec tmux attach -t "$SESSION"
+    SESSION="${1:-$SESSION}"; exec tmux attach -t "$SESSION"
     ;;
   list)
     tmux ls
@@ -93,74 +171,23 @@ case "$cmd" in
     session_exists "$SESSION" || tmux new-session -d -s "$SESSION" -n "zsh" zsh -l
     tmux new-window -t "$SESSION" -n "$title" "poly $lang $code; echo; echo '[done] press Enter...'; read _"
     ;;
+  theme)
+    name="${1:-}"; [[ -z "$name" ]] && { print -u2 "Usage: omniterm theme <name>"; exit 2; }
+    session_exists "$SESSION" || { print -u2 "Session not running: $SESSION"; exit 1; }
+    apply_theme "$SESSION" "$name"
+    ;;
+  doctor)
+    doctor
+    ;;
+  self-update)
+    self_update "${1:-}"
+    ;;
+  snapshot)
+    snapshot_save "${1:-$SESSION}" "${2:-default}"
+    ;;
+  restore)
+    snapshot_restore "${1:-$SESSION}" "${2:-default}"
+    ;;
   *)
     usage; exit 2 ;;
 esac
-# ----- EXTRA SUBCOMMANDS -----
-
-doctor() {
-  echo "[doctor] zsh:    $(zsh --version 2>/dev/null || echo missing)"
-  echo "[doctor] tmux:   $(tmux -V 2>/dev/null || echo missing)"
-  for x in node python3 gcc docker podman firejail inotifywait unzip rsync; do
-    if command -v "$x" >/dev/null 2>&1; then
-      v="$($x --version 2>&1 | head -n1)"
-      echo "[doctor] $x:    $v"
-    else
-      echo "[doctor] $x:    missing"
-    fi
-  done
-  [[ -x "$HOME/.local/bin/poly" ]] || echo "[doctor] poly not on PATH"
-  [[ -x "$HOME/.local/bin/omniterm" ]] || echo "[doctor] omniterm not on PATH"
-}
-
-self_update() {
-  local repo="${1:-$HOME/kydras-omniterm}"
-  if [[ -d "$repo/.git" ]]; then
-    echo "[self-update] repo: $repo"
-    (cd "$repo" && git pull --ff-only && ./install.sh)
-    echo "[self-update] done."
-  elif command -v gh >/dev/null 2>&1; then
-    echo "[self-update] using gh to download latest release asset"
-    tmp="$(mktemp -d)"; pushd "$tmp" >/dev/null
-    gh release download -R Kydras8/kydras-omniterm -p 'kydras-omniterm-v*.zip' -O latest.zip
-    unzip -q latest.zip
-    rsync -av kydras-omniterm/ "$HOME/kydras-omniterm/"
-    "$HOME/kydras-omniterm/install.sh"
-    popd >/dev/null; rm -rf "$tmp"
-    echo "[self-update] done."
-  else
-    echo "[-] provide repo path or install GitHub CLI (gh)" >&2
-    return 2
-  fi
-}
-
-snapshot_save() {
-  local s="${1:-${OMNITERM_SESSION:-k-omni}}"
-  local name="${2:-default}"
-  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/omniterm/snapshots"
-  mkdir -p "$dir"
-  local out="$dir/${s}-${name}.tmux"
-  {
-    echo "# snapshot for session $s @ $(date -Is)"
-    echo "new-session -d -s \"$s\" -n zsh zsh -l"
-    # windows
-    tmux list-windows -t "$s" -F "rename-window -t \"$s:#{window_index}\" \"#{window_name}\"" || true
-    # for each window, apply layout (best-effort)
-    tmux list-windows -t "$s" -F "#{window_index} #{window_layout}" | while read -r idx layout; do
-      echo "select-window -t \"$s:$idx\""
-      echo "select-layout -t \"$s:$idx\" $layout"
-    done
-  } > "$out"
-  echo "[snapshot] saved -> $out"
-}
-
-snapshot_restore() {
-  local s="${1:-${OMNITERM_SESSION:-k-omni}}"
-  local name="${2:-default}"
-  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/omniterm/snapshots"
-  local file="$dir/${s}-${name}.tmux"
-  [[ -r "$file" ]] || { echo "[-] snapshot not found: $file" >&2; return 2; }
-  tmux has-session -t "$s" 2>/dev/null || tmux new-session -d -s "$s" -n zsh zsh -l
-  tmux source-file "$file"
-  echo "[snapshot] restored from $file"
-}
