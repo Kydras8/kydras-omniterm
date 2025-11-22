@@ -1,3 +1,11 @@
+<!-- Kydras Repo Header -->
+<p align="center">
+  <strong>Kydras Systems Inc.</strong><br/>
+  <em>Nothing is off limits.</em>
+</p>
+
+---
+
 # Kydras OmniTerm
 
 Polyglot terminal runner with multi-session launcher.
@@ -88,3 +96,4 @@ omniterm queue add :bash 'echo one; sleep 1' --title one --notify
 omniterm queue add :py 'print(2+2)' --title two --notify
 omniterm queue run
 ```
+
